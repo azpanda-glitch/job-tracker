@@ -7,15 +7,17 @@
  * Applications with no term in the role or email go to the "No Term" tab.
  *
  * Setup: open your Sheet > Extensions > Apps Script, paste this file, save, and
- * run setup() once. It backfills the last 90 days and then scans hourly.
+ * run setup() once. It backfills the last year (in chunks that resume on their
+ * own, since Apps Script stops runs at 6 minutes) and then scans hourly.
  */
 
 const CONFIG = {
   NO_TERM_SHEET_NAME: 'No Term',
   SEEN_SHEET_NAME: '_seen',
   SCAN_DAYS: 2,            // hourly scans look back this far; overlap is fine, messages are deduped by ID
-  BACKFILL_DAYS: 90,
-  MAX_THREADS: 500,
+  BACKFILL_DAYS: 365,
+  BACKFILL_WINDOW_DAYS: 14,  // backfill walks the year oldest-first in slices this size
+  MAX_THREADS: 2000,         // per search; a slice or 2-day scan won't come close
   MAX_RUN_MS: 4.5 * 60 * 1000, // Apps Script kills runs at 6 min; stop early and save progress
   MERGE_WINDOW_DAYS: 3,    // a role-less confirmation within this many days of another from the same company is a duplicate
 };
@@ -88,9 +90,7 @@ const JOB_LINK_PATTERNS = [
 // ---------- Entry points ----------
 
 function setup() {
-  ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'scanNow')
-    .forEach(t => ScriptApp.deleteTrigger(t));
+  clearTriggers_('scanNow');
   ScriptApp.newTrigger('scanNow').timeBased().everyHours(1).create();
   backfill();
 }
@@ -99,41 +99,99 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Job Tracker')
     .addItem('Scan now', 'scanNow')
-    .addItem(`Backfill last ${CONFIG.BACKFILL_DAYS} days`, 'backfill')
+    .addItem('Backfill last 12 months', 'backfill')
     .addToUi();
 }
 
-function scanNow() { scan_(CONFIG.SCAN_DAYS); }
+function scanNow() {
+  scan_(`newer_than:${CONFIG.SCAN_DAYS}d`, Date.now() - CONFIG.SCAN_DAYS * 864e5, Date.now());
+}
 
-function backfill() { scan_(CONFIG.BACKFILL_DAYS); }
+/** Starts (or restarts) the backfill from BACKFILL_DAYS ago. Already-logged emails are skipped. */
+function backfill() {
+  PropertiesService.getScriptProperties().setProperties({
+    backfillCursor: String(Date.now() - CONFIG.BACKFILL_DAYS * 864e5),
+    backfillUntil: String(Date.now()),
+  });
+  continueBackfill();
+}
+
+/**
+ * Works through the backfill one slice at a time, oldest first. When a run is
+ * about to hit the time limit it schedules itself to pick up where it left off.
+ */
+function continueBackfill() {
+  clearTriggers_('continueBackfill');
+  const props = PropertiesService.getScriptProperties();
+  let cursor = Number(props.getProperty('backfillCursor'));
+  const until = Number(props.getProperty('backfillUntil'));
+  if (!cursor || !until) return;
+
+  const started = Date.now();
+  while (cursor < until) {
+    const end = Math.min(cursor + CONFIG.BACKFILL_WINDOW_DAYS * 864e5, until);
+    // Gmail's after:/before: are whole days; the extra day of overlap is deduped by message ID.
+    const query = `after:${gmailDate_(cursor)} before:${gmailDate_(end + 864e5)}`;
+    if (!scan_(query, cursor, started)) break; // out of time (or another scan holds the lock)
+    cursor = end;
+    props.setProperty('backfillCursor', String(cursor));
+  }
+
+  if (cursor < until) {
+    console.log(`Backfill paused at ${new Date(cursor).toDateString()}; resuming in 1 minute`);
+    ScriptApp.newTrigger('continueBackfill').timeBased().after(60 * 1000).create();
+  } else {
+    props.deleteProperty('backfillCursor');
+    props.deleteProperty('backfillUntil');
+    console.log('Backfill complete');
+  }
+}
+
+function clearTriggers_(handler) {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === handler)
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+function gmailDate_(ms) {
+  return Utilities.formatDate(new Date(ms), Session.getScriptTimeZone(), 'yyyy/MM/dd');
+}
 
 // ---------- Scan ----------
 
-function scan_(days) {
+/**
+ * Processes every not-yet-seen message dated on/after sinceMs in threads matching
+ * the time clause. Returns true if it finished, false if it stopped early (time
+ * limit or lock busy); progress is saved either way.
+ */
+function scan_(timeClause, sinceMs, started) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(10000)) return; // another scan is running
+  if (!lock.tryLock(10000)) return false; // another scan is running
   try {
-    const started = Date.now();
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const seen = loadSeen_(ss);
     const table = readTables_(ss);
     const me = Session.getActiveUser().getEmail().toLowerCase();
-    const cutoff = started - days * 864e5;
+    const outOfTime = () => Date.now() - started > CONFIG.MAX_RUN_MS;
 
     const messages = [];
-    searchThreads_(buildQuery(days)).forEach(thread => {
+    for (const thread of searchThreads_(buildQuery(timeClause))) {
+      if (outOfTime()) return false;
+      // Later messages in a thread (e.g. a rejection reply) are included even if
+      // they fall after this slice, since they may not match the search on their own.
       thread.getMessages().forEach(m => {
-        if (seen.has(m.getId()) || m.getDate().getTime() < cutoff) return;
+        if (seen.has(m.getId()) || m.getDate().getTime() < sinceMs) return;
         if (me && m.getFrom().toLowerCase().includes(me)) return; // your own replies
         messages.push(m);
       });
-    });
+    }
     // Oldest first so a thread's statuses progress in order.
     messages.sort((a, b) => a.getDate() - b.getDate());
 
     const newSeen = [];
+    let finished = true;
     for (const m of messages) {
-      if (Date.now() - started > CONFIG.MAX_RUN_MS) break; // rest gets picked up next run
+      if (outOfTime()) { finished = false; break; } // the rest gets picked up next run
       newSeen.push(m.getId());
       const parsed = parseEmail({
         from: m.getFrom(),
@@ -149,16 +207,17 @@ function scan_(days) {
 
     writeTables_(ss, table);
     saveSeen_(ss, newSeen);
+    return finished;
   } finally {
     lock.releaseLock();
   }
 }
 
-function buildQuery(days) {
+function buildQuery(timeClause) {
   const from = ATS_DOMAINS.join(' OR ');
   const subjects = SUBJECT_PHRASES.map(p => `"${p}"`).join(' OR ');
   const noise = NOISE_SUBJECTS.map(p => `"${p}"`).join(' OR ');
-  return `(from:(${from}) OR subject:(${subjects})) -subject:(${noise}) newer_than:${days}d`;
+  return `(from:(${from}) OR subject:(${subjects})) -subject:(${noise}) ${timeClause}`;
 }
 
 function searchThreads_(query) {

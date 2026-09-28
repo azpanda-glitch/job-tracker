@@ -137,6 +137,6 @@ const kept = t2.rows[0].values.Status === 'Withdrawn';
 console.log(`${kept ? 'ok  ' : 'FAIL'} hand-typed status is left alone`);
 if (!kept) fail++;
 
-console.log('\nquery length:', buildQuery(2).length, 'chars');
+console.log('\nquery length:', buildQuery('newer_than:2d').length, 'chars');
 console.log(fail ? `\n${fail} failing` : '\nall passing');
 process.exit(fail ? 1 : 0);
