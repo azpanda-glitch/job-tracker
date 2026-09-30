@@ -73,6 +73,33 @@ const GENERIC_SENDERS = [
   'hirevue', 'handshake', 'indeed', 'eightfold', 'avature', 'oracle', 'dayforce',
 ];
 
+// Local parts that are the mailer, not the employer. Matched as a substring, so
+// "jobs-noreply" and "talent-acquisition" are caught too.
+const GENERIC_LOCAL = /no-?reply|do-?not-?reply|notification|unsubscribe|support|help|info|hello|contact|career|job|talent|recruit|hiring|^hr$|people|team|mail|alert|update|apply|application|candidate|auto|system|admin|service|inbox|message|survey|feedback/i;
+
+// Two-level public suffixes, so acme.co.uk reads as "acme", not "co".
+const MULTI_SUFFIX = /\.(co|com|net|org|ac|gov|edu|gob|or)\.[a-z]{2,3}$/;
+
+// Trailing words a company bolts onto its domain. Stripped only when enough of
+// the name is left ("datadoghq" -> Datadog, but "gmail" stays Gmail).
+const DOMAIN_SUFFIX = /(hq|inc|corp|group|global|holdings|careers?|jobs?|talent|hiring|recruiting|mail|email)$/;
+
+// Personal mailboxes: a recruiter writing from one tells you nothing about the
+// employer, so the company has to come from the subject or body instead.
+const FREE_MAIL = /^(gmail|googlemail|yahoo|ymail|rocketmail|hotmail|outlook|live|msn|aol|icloud|me|mac|proton|protonmail|gmx|zoho|fastmail|yandex|mail|email|inbox|qq|163|126|naver|comcast|verizon|att|sbcglobal|bellsouth|cox|charter|earthlink)$/;
+
+// Domains whose company name can't be recovered by capitalizing. Add your own.
+const DOMAIN_COMPANY_NAMES = {
+  goldmansachs: 'Goldman Sachs', jpmorgan: 'JPMorgan Chase', jpmorganchase: 'JPMorgan Chase',
+  morganstanley: 'Morgan Stanley', bankofamerica: 'Bank of America', wellsfargo: 'Wells Fargo',
+  janestreet: 'Jane Street', twosigma: 'Two Sigma', capitalone: 'Capital One',
+  statefarm: 'State Farm', generalmotors: 'General Motors', lockheedmartin: 'Lockheed Martin',
+  americanexpress: 'American Express', deshaw: 'D. E. Shaw', citadelsecurities: 'Citadel Securities',
+  hubspot: 'HubSpot', paypal: 'PayPal', linkedin: 'LinkedIn', github: 'GitHub', nvidia: 'NVIDIA',
+  ibm: 'IBM', sap: 'SAP', ey: 'EY', pwc: 'PwC', kpmg: 'KPMG', bcg: 'BCG', tiktok: 'TikTok',
+  doordash: 'DoorDash', youtube: 'YouTube', openai: 'OpenAI', anthropic: 'Anthropic',
+};
+
 // Words that mean a captured "company" is actually a job title.
 const JOB_WORDS = /\b(engineer(ing)?|intern(ship)?|developer|analyst|scientist|manager|position|role|software|program|summer|fall|spring|winter|co-?op|associate|specialist|designer|new grad|graduate|team|job)\b/i;
 
@@ -239,6 +266,7 @@ function scan_(timeClause, sinceMs, started) {
         body: m.getPlainBody(),
         html: m.getBody(),
         date: m.getDate(),
+        replyTo: m.getReplyTo(),
       });
       if (!parsed) continue;
       parsed.threadUrl = 'https://mail.google.com/mail/#all/' + m.getThread().getId();
@@ -279,7 +307,7 @@ function searchThreads_(query) {
  * Returns {status, company, role, term, link, source, date, notes} or null if the
  * email isn't an application email.
  */
-function parseEmail({ from, subject, body, html, date }) {
+function parseEmail({ from, subject, body, html, date, replyTo }) {
   subject = (subject || '')
     .replace(/^\s*((re|fwd?):\s*)+/i, '')
     .replace(/^\s*(invitation|reminder|action required|update|important|next steps)\s*[:–-]\s*/i, '')
@@ -290,7 +318,7 @@ function parseEmail({ from, subject, body, html, date }) {
   const status = classifyStatus(text);
   if (!status) return null;
 
-  const company = extractCompany(subject, body, from || '');
+  const company = extractCompany(subject, body, from || '', replyTo || '');
   const role = extractRole(subject, body);
   const term = extractTerm(role, subject, body.slice(0, 3000));
   let link = extractJobLink(body + '\n' + (html || ''));
@@ -312,7 +340,7 @@ function classifyStatus(text) {
 // A run of 1–5 capitalized words, e.g. "Stripe", "Jane Street", "JPMorgan Chase & Co".
 const CAP_RUN = "([A-Z0-9][\\w&.'’-]*(?:[ ](?:[A-Z0-9&][\\w&.'’-]*|of|and|de)){0,4})";
 
-function extractCompany(subject, body, from) {
+function extractCompany(subject, body, from, replyTo) {
   const head = body.slice(0, 2000);
   const candidates = [
     match_(subject, /application (?:was |has been )?sent to (.+)$/i),                        // LinkedIn Easy Apply
@@ -321,9 +349,13 @@ function extractCompany(subject, body, from) {
     match_(subject, new RegExp('^' + CAP_RUN + '[ ]*[-–|:]')),                              // "Stripe - Application Received"
     match_(subject, new RegExp(CAP_RUN.replace('{0,4})', '{0,4}?)') + '[ ]+(?:[Oo]nline [Aa]ssessment|[Cc]oding [Cc]hallenge|[Aa]ssessment|[Ii]nterview)')), // "Two Sigma Online Assessment"
     companyFromSenderName_(from),
+    // The sending domain outranks anything scraped out of the body: a company
+    // that mails you from its own domain has already named itself.
+    companyFromSenderAddress_(from),
+    // ATS mail often sets Reply-To to the employer's own recruiter.
+    companyFromSenderAddress_(replyTo || ''),
     match_(head, new RegExp("\\b(?:appl(?:y|ying|ication)|interest|position|role|opening|internship)\\b[^!?\\n]{0,80}?[ ](?:at|with)[ ]+" + CAP_RUN)),
     match_(head, new RegExp("\\b(?:appl(?:y|ying|ication)|interest)[ ]+(?:to|in|with|at)[ ]+" + CAP_RUN)),
-    companyFromSenderAddress_(from),
   ];
   for (const c of candidates) {
     const cleaned = cleanCompany_(c);
@@ -338,6 +370,8 @@ function cleanCompany_(s) {
   // Drop trailing words that start the next sentence/clause.
   s = s.replace(/\s+(We|Our|This|Your|You|I|Hi|Hello|Thank|Thanks|Team|Careers|Recruiting)\b.*$/, '').trim();
   if (!s || s.length > 50 || JOB_WORDS.test(s)) return '';
+  // A stray pronoun ("...for your interest in Us") is not a company.
+  if (/^(us|we|you|your|our|the|this|that|it|they|them|here|there|all)$/i.test(s)) return '';
   if (GENERIC_SENDERS.includes(s.toLowerCase())) return '';
   return s;
 }
@@ -368,16 +402,40 @@ function nameMatchesAddress_(name, from) {
   return parts.length >= 2 && parts.every(w => local.includes(w));
 }
 
+/**
+ * The company implied by an email address. For a company's own domain that's the
+ * domain itself; for an ATS it's the local part, which is where several of them
+ * put the employer (<company>@myworkday.com, <company>@talent.icims.com).
+ */
 function companyFromSenderAddress_(from) {
   const addr = ((from.match(/<([^>]+)>/) || [])[1] || from).trim().toLowerCase();
   const [local, domain] = addr.split('@');
-  if (!domain) return '';
-  // Workday sends from <company>@myworkday.com.
-  if (/myworkday\.com$/.test(domain) && !/^(no-?reply|donotreply|notifications?)$/.test(local)) return titleCase_(local);
-  if (ATS_DOMAINS.some(d => domain.endsWith(d))) return '';
-  const parts = domain.split('.');
-  const base = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
-  return base ? titleCase_(base) : '';
+  if (!domain || !local) return '';
+  if (ATS_DOMAINS.some(d => domain.endsWith(d))) {
+    // A generic local part is the ATS talking, and says nothing about who hired.
+    return GENERIC_LOCAL.test(local) ? '' : companyFromWord_(local);
+  }
+  const base = domainBase_(domain);
+  return FREE_MAIL.test(base) ? '' : companyFromWord_(base);
+}
+
+/** "careers.acme.co.uk" -> "acme", "mail.figma.com" -> "figma" */
+function domainBase_(domain) {
+  const stripped = MULTI_SUFFIX.test(domain)
+    ? domain.replace(MULTI_SUFFIX, '')
+    : domain.replace(/\.[a-z]{2,}$/, '');
+  const parts = stripped.split('.');
+  return parts[parts.length - 1] || '';
+}
+
+/** "datadoghq" -> "Datadog", "goldmansachs" -> "Goldman Sachs" */
+function companyFromWord_(word) {
+  const key = word.replace(/[^a-z0-9]/g, '');
+  if (!key || key.length < 2) return '';
+  if (DOMAIN_COMPANY_NAMES[key]) return DOMAIN_COMPANY_NAMES[key];
+  const trimmed = key.replace(DOMAIN_SUFFIX, '');
+  const base = trimmed.length >= 3 ? trimmed : key;
+  return DOMAIN_COMPANY_NAMES[base] || titleCase_(base);
 }
 
 function extractRole(subject, body) {

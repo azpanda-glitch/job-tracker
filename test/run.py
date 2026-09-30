@@ -114,6 +114,32 @@ TERM_CASES = [
     ("Senior Software Engineer", ""),
 ]
 
+# --- Company from the email address ---------------------------------------
+# For a company's own domain the domain names the employer; for an ATS the local
+# part often does ("<company>@myworkday.com"). Everything generic must stay empty
+# so the subject or body gets a turn instead.
+
+ADDRESS_CASES = [
+    ("recruiting@datadoghq.com", "Datadog"),          # trailing "hq" stripped
+    ("careers@acme.co.uk", "Acme"),                   # two-level suffix, not "Co"
+    ("team@acme.com.au", "Acme"),
+    ("noreply@mail.ramp.com", "Ramp"),                # subdomain ignored
+    ("jobs@hire.notion.so", "Notion"),
+    ("priya.raman@figma.com", "Figma"),               # individual recruiter
+    ("talent@goldmansachs.com", "Goldman Sachs"),     # known multi-word name
+    ("university@jpmorganchase.com", "JPMorgan Chase"),
+    ("recruiting@janestreet.com", "Jane Street"),
+    ("nvidia@myworkday.com", "NVIDIA"),               # ATS: employer in local part
+    ("figma@talent.icims.com", "Figma"),
+    ("no-reply@icims.com", ""),                       # ATS: generic local part
+    ("jobs-noreply@linkedin.com", ""),
+    ("support@hackerrankforwork.com", ""),
+    ("noreply@us.greenhouse-mail.io", ""),
+    ("jane.doe@gmail.com", ""),                       # personal mailbox
+    ("someone@outlook.com", ""),
+]
+
+
 # --- Whole emails ----------------------------------------------------------
 
 EMAIL_CASES = [
@@ -137,7 +163,7 @@ EMAIL_CASES = [
             body="Thank you for your application. We have received your application for "
                  "Software Engineering Intern - 2027 (JR1987654).",
         ),
-        want={"status": "Applied", "company": "Nvidia", "term": "2027"},
+        want={"status": "Applied", "company": "NVIDIA", "term": "2027"},
     ),
     dict(
         name="Lever confirmation",
@@ -317,11 +343,16 @@ def main():
         if got != want:
             problems.append("term %r: got %r, want %r" % (text, got, want))
 
+    for addr, want in ADDRESS_CASES:
+        got = js(ctx, "companyFromSenderAddress_(%s)", addr)
+        if got != want:
+            problems.append("address %r: got %r, want %r" % (addr, got, want))
+
     check_emails(ctx, problems)
     check_tables(ctx, problems)
     check_tab_order(ctx, problems)
 
-    total = len(STATUS_CASES) + len(TERM_CASES) + len(EMAIL_CASES) + 5
+    total = len(STATUS_CASES) + len(TERM_CASES) + len(ADDRESS_CASES) + len(EMAIL_CASES) + 5
     for p in problems:
         print("FAIL %s" % p)
     print("\n%d checks, %d failing" % (total, len(problems)))

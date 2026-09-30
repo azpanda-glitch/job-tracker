@@ -25,6 +25,18 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
    Term tabs appear as applications are found.
 4. Reload the Sheet. A "Job Tracker" menu appears with "Scan now" and "Backfill".
 
+## How the company is identified
+In order, first hit wins:
+1. The subject ("Thank you for applying to **Stripe**", LinkedIn's "your application was sent to **X**").
+2. The sender's display name, unless it's a person's name that's also spelled out in the address.
+3. **The sending domain.** `recruiting@datadoghq.com` -> Datadog, `careers@acme.co.uk` -> Acme,
+   `noreply@mail.ramp.com` -> Ramp. Personal domains (Gmail, Outlook) are skipped.
+   For ATS senders the local part is used instead, since that's where the employer usually
+   sits (`nvidia@myworkday.com`, `figma@talent.icims.com`); a generic one (`no-reply@`,
+   `jobs-noreply@`) is ignored.
+4. The **Reply-To** address, read the same way. ATS mail often replies to the employer's recruiter.
+5. The body ("...your application **at X**").
+
 ## Behavior
 - Tabs are created automatically, newest term first. The term is read from the role
   title or email ("Intern, Summer 2027", "Fall '26", "2027 Summer Analyst"). Season and
@@ -65,6 +77,8 @@ Edit the constants at the top of `Code.gs`:
 | `BODY_PHRASES` | wording searched anywhere in the message, which is how rejections from a plain recruiter address with a vague subject get found |
 | `NOISE_SUBJECTS` | subjects to exclude (job alerts) |
 | `STATUS_PATTERNS` | the wording that sets each status |
+| `DOMAIN_COMPANY_NAMES` | domains that don't read as a name when capitalized (`goldmansachs` -> Goldman Sachs). Add your own |
+| `FREE_MAIL` | personal mail domains, which never name a company |
 
 The Gmail search is deliberately wide -- `STATUS_PATTERNS` is the real filter, so a
 thread that matches the search but isn't an application email simply produces no row.
