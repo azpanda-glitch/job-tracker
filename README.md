@@ -7,7 +7,14 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
 ## Setup
 1. Open (or create) the Google Sheet you want to use.
 2. Extensions > Apps Script. Replace the contents of `Code.gs` with this repo's `Code.gs`. Save.
-3. Select `setup` in the function dropdown and click Run. Approve the Gmail + Sheets permissions.
+3. Select `setup` in the function dropdown and click Run, then approve the Gmail + Sheets permissions.
+
+   **"Google hasn't verified this app"** appears here, and it's expected: this is your own
+   script, and verification only applies to apps published to other people. Click
+   **Advanced**, then **Go to \<project name\> (unsafe)**, then **Allow**. Nothing leaves your
+   Google account. If there's no **Advanced** link, you're on a school or work account whose
+   admin blocks unverified scripts — use a personal Gmail account instead.
+
    This backfills the last 12 months and installs an hourly scan. Apps Script stops
    runs at 6 minutes, so the backfill works through the year in 2-week slices, oldest
    first, and schedules itself to resume a minute later until it's done. A big inbox
@@ -26,6 +33,17 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
 - After the backfill, hourly scans only look at the last 2 days; anything already
   processed (IDs in the hidden `_seen` tab) is skipped. Delete `_seen` and run
   Job Tracker > Backfill to rescan everything.
+
+## Troubleshooting
+
+- **"Google hasn't verified this app":** expected. See step 3 above.
+- **"Authorization is required to perform that action":** the hourly trigger was installed
+  before permissions were granted. Run `setup` again from the Apps Script editor.
+- **No rows after the first run:** the backfill works in slices and may still be running.
+  Check Apps Script > Executions. If `continueBackfill` keeps appearing, it's still going.
+- **Applications missing:** the email's sender or subject didn't match `ATS_DOMAINS` /
+  `SUBJECT_PHRASES`. Add the sender's domain to `ATS_DOMAINS`, delete the hidden `_seen`
+  tab, and run Job Tracker > Backfill.
 
 ## Tuning
 Edit the constants at the top of `Code.gs`: `ATS_DOMAINS`, `SUBJECT_PHRASES`,
