@@ -7,6 +7,9 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
 ## Setup
 1. Open (or create) the Google Sheet you want to use.
 2. Extensions > Apps Script. Replace the contents of `Code.gs` with this repo's `Code.gs`. Save.
+   Click **Untitled project** at the top-left and rename it (e.g. "Job Tracker") -- that name is
+   what the permission screen in the next step shows you, so "Untitled project" there is just
+   this project, not something suspicious.
 3. Select `setup` in the function dropdown and click Run, then approve the Gmail + Sheets permissions.
 
    **"Google hasn't verified this app"** appears here, and it's expected: this is your own
@@ -24,8 +27,12 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
 
 ## Behavior
 - Tabs are created automatically, newest term first. The term is read from the role
-  title or email ("Intern, Summer 2027", "Fall '26", "2027 Summer Analyst").
-  Applications with no term go to the "No Term" tab; drag rows to the right tab if needed.
+  title or email ("Intern, Summer 2027", "Fall '26", "2027 Summer Analyst"). Season and
+  year don't have to be adjacent, so "Finance Summer Analyst 2027" works too.
+- When a posting names a year but no season ("SWE Intern - 2027"), the tab is just the
+  year ("2027"). Drag those rows into a season tab if you know which one it is; a later
+  email that does name the season updates the same row rather than adding a new one.
+  Applications with no year at all go to the "No Term" tab.
 - One row per application; later emails update the row's Status instead of adding rows.
 - Status only moves forward: Applied → Assessment → Interview → Rejected/Offer.
   Statuses you type yourself (e.g. Withdrawn, Ghosted) are never overwritten.
@@ -41,12 +48,27 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
   before permissions were granted. Run `setup` again from the Apps Script editor.
 - **No rows after the first run:** the backfill works in slices and may still be running.
   Check Apps Script > Executions. If `continueBackfill` keeps appearing, it's still going.
-- **Applications missing:** the email's sender or subject didn't match `ATS_DOMAINS` /
-  `SUBJECT_PHRASES`. Add the sender's domain to `ATS_DOMAINS`, delete the hidden `_seen`
-  tab, and run Job Tracker > Backfill.
+- **Applications missing:** the email didn't match `ATS_DOMAINS`, `SUBJECT_PHRASES`, or
+  `BODY_PHRASES`. Add the sender's domain to `ATS_DOMAINS` (or the wording to the phrase
+  lists), delete the hidden `_seen` tab, and run Job Tracker > Backfill.
+- **A row's status is behind:** the email's wording isn't in `STATUS_PATTERNS`. Paste the
+  sentence into the relevant pattern and re-run Backfill. Rejection wording varies the most,
+  so that's the usual culprit.
 
 ## Tuning
-Edit the constants at the top of `Code.gs`: `ATS_DOMAINS`, `SUBJECT_PHRASES`,
-`NOISE_SUBJECTS`, and `STATUS_PATTERNS`. After changes, run the parser tests:
+Edit the constants at the top of `Code.gs`:
 
-    node test/parse.test.js
+| Constant | What it controls |
+|---|---|
+| `ATS_DOMAINS` | senders that are always worth scanning (Workday, Greenhouse, Lever, ...) |
+| `SUBJECT_PHRASES` | subject wording that marks an application email |
+| `BODY_PHRASES` | wording searched anywhere in the message, which is how rejections from a plain recruiter address with a vague subject get found |
+| `NOISE_SUBJECTS` | subjects to exclude (job alerts) |
+| `STATUS_PATTERNS` | the wording that sets each status |
+
+The Gmail search is deliberately wide -- `STATUS_PATTERNS` is the real filter, so a
+thread that matches the search but isn't an application email simply produces no row.
+
+After changes, run the parser tests:
+
+    python3 test/run.py   # needs: pip install quickjs

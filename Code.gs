@@ -52,6 +52,16 @@ const SUBJECT_PHRASES = [
   'thank you for your interest', 'application received', 'received your application',
   'application was sent', 'application submitted', 'your application', 'application update',
   'interview invitation', 'invitation to interview', 'online assessment', 'coding assessment',
+  // Broad catch for postings whose confirmation says nothing else recognizable.
+  'intern', 'internship', 'co-op', 'new grad',
+];
+
+// Searched anywhere in the message, not just the subject. Rejections are the
+// emails most likely to come from a plain recruiter address with a vague
+// subject ("Update on your candidacy"), so the body is what identifies them.
+const BODY_PHRASES = [
+  'unfortunately', 'regret to inform', 'not be moving forward', 'other candidates',
+  'no longer being considered', 'not selected',
 ];
 
 const NOISE_SUBJECTS = ['job alert', 'jobs you may', 'recommended jobs', 'new jobs', 'jobs for you', 'is hiring'];
@@ -66,10 +76,40 @@ const GENERIC_SENDERS = [
 // Words that mean a captured "company" is actually a job title.
 const JOB_WORDS = /\b(engineer(ing)?|intern(ship)?|developer|analyst|scientist|manager|position|role|software|program|summer|fall|spring|winter|co-?op|associate|specialist|designer|new grad|graduate|team|job)\b/i;
 
+// "will not"/"won't"/"cannot" and friends.
+const NEG = '(?:(?:will|would|can|could|shall)\\s*not|(?:wo|wou?ld|ca|cou?ld|sha)n[\\u2019\\u0027]?t)';
+
+// Rules out conditional next steps ("can't move forward until you finish the OA").
+const NOT_CONDITIONAL = '(?![^.]{0,60}\\b(?:until|unless|without|pending|once\\s+you|as\\s+soon\\s+as|if\\s+you|when\\s+you)\\b)';
+
 const STATUS_PATTERNS = [
   // Checked in this order: rejections often also say "thank you for applying".
   ['Offer', /\b(pleased to offer|offer letter|extend (you )?an offer|offer of employment|congratulations[^.]{0,60}\boffer)\b/i],
-  ['Rejected', /\b(not (to )?(be )?mov(e|ing) forward|decided to (move forward|proceed|pursue|go) with (other|another)|no longer (under )?consider|regret to inform|(were|was|have) not (been )?selected|will not be (moving|proceeding)|position has been filled|pursue other candidates|not able to offer you|unable to offer you|decided not to (move|proceed))/i],
+  // "Move forward" is also how good news is phrased ("we'd like to move forward
+  // with your application"), so every variant here needs either a negation or
+  // "with other candidates" -- never "move forward" on its own. Negations also
+  // carry NOT_CONDITIONAL, because "we can't move forward until you finish the
+  // assessment" is a next step, not a rejection.
+  ['Rejected', new RegExp([
+    'regret to inform',
+    'mov(?:e|ing|ed)\\s+(?:you\\s+)?(?:forward|ahead)\\s+with\\s+(?:other|another|a\\s+different|different)',
+    '(?:decided|chosen|elected|opted)\\s+to\\s+(?:pursue|proceed\\s+with|go\\s+with|interview)\\s+(?:other|another|different)',
+    '(?:decided|chosen|elected|opted)\\s+not\\s+to\\s+(?:move|proceed|continue|advance)',
+    NEG + '\\s+(?:be\\s+)?(?:able\\s+to\\s+)?(?:mov|proceed|progress|continu|advanc)' + NOT_CONDITIONAL,
+    '(?:are|is|was|were|am)\\s+(?:not|un)\\s?able\\s+to\\s+(?:move|proceed|offer|progress|advance)' + NOT_CONDITIONAL,
+    'not\\s+(?:be\\s+)?(?:moving|proceeding|progressing|advancing|continuing)' + NOT_CONDITIONAL,
+    'not\\s+(?:to\\s+)?(?:be\\s+)?mov(?:e|ing)\\s+forward' + NOT_CONDITIONAL,
+    'no\\s+longer\\s+(?:being\\s+|under\\s+)?consider',
+    '(?:were|was|have|has|are|is)\\s+not\\s+(?:been\\s+)?(?:select|chos|success)',
+    'not\\s+(?:been\\s+)?(?:selected|chosen|successful)',
+    '(?:position|role|req(?:uisition)?)\\s+(?:has\\s+been|was|is)\\s+(?:now\\s+)?(?:filled|closed)',
+    '(?:have|has|we[\\u2019\\u0027]ve)\\s+(?:now\\s+)?filled\\s+(?:the|this)',
+    'pursue\\s+other\\s+(?:candidates|applicants)',
+    'other\\s+(?:candidates|applicants)\\s+whose',
+    '(?:not|un)able\\s+to\\s+offer\\s+you',
+    'application\\s+(?:was|has\\s+been)\\s+(?:not\\s+successful|unsuccessful)',
+    'was\\s+not\\s+successful'
+  ].join('|'), 'i')],
   ['Interview', /\b(invite you to (an? )?(interview|phone screen|virtual interview|onsite)|like to (schedule|invite you|move you forward)|interview invitation|invitation to interview|(provide|share|send) (us )?your availability|next round of interview|(please|click (here )?to|use (the|this) link (below )?to) schedule (your|an|a) (interview|phone screen))/i],
   ['Assessment', /\b(online assessment|coding (challenge|assessment|test)|take[- ]home|assessment invitation|invited to (take|complete)|complete (the|an|this|our) (online )?(assessment|challenge)|hackerrank|codesignal|codility)\b/i],
   ['Applied', /\b(thank(s| you) for (your )?(applying|application|interest|submitting)|application (has been |was )?(received|submitted|sent)|received your application|successfully (submitted|applied)|your application (to|for|at))/i],
@@ -216,8 +256,11 @@ function scan_(timeClause, sinceMs, started) {
 function buildQuery(timeClause) {
   const from = ATS_DOMAINS.join(' OR ');
   const subjects = SUBJECT_PHRASES.map(p => `"${p}"`).join(' OR ');
+  const bodies = BODY_PHRASES.map(p => `"${p}"`).join(' OR ');
   const noise = NOISE_SUBJECTS.map(p => `"${p}"`).join(' OR ');
-  return `(from:(${from}) OR subject:(${subjects})) -subject:(${noise}) ${timeClause}`;
+  // Deliberately wide: classifyStatus is the real filter, so a thread that
+  // matches here but isn't an application email simply produces no row.
+  return `(from:(${from}) OR subject:(${subjects}) OR (${bodies})) -subject:(${noise}) ${timeClause}`;
 }
 
 function searchThreads_(query) {
@@ -309,7 +352,20 @@ function companyFromSenderName_(from) {
     .trim();
   if (!name || /@/.test(name)) return '';
   if (GENERIC_SENDERS.some(g => name.toLowerCase().includes(g))) return '';
+  // Widening the search to rejection wording brought in mail from individual
+  // recruiters ("Priya Raman <priya.raman@figma.com>"), whose display name is a
+  // person, not the employer. When the name is spelled out in the address, let
+  // the domain name the company instead.
+  if (nameMatchesAddress_(name, from)) return '';
   return name;
+}
+
+function nameMatchesAddress_(name, from) {
+  const local = (((from.match(/<([^>]+)>/) || [])[1] || from).split('@')[0] || '')
+    .toLowerCase().replace(/[^a-z]/g, '');
+  if (!local) return false;
+  const parts = name.toLowerCase().match(/[a-z]{2,}/g) || [];
+  return parts.length >= 2 && parts.every(w => local.includes(w));
 }
 
 function companyFromSenderAddress_(from) {
@@ -353,14 +409,35 @@ function cleanRole_(s) {
 const SEASONS = { winter: 'Winter', spring: 'Spring', summer: 'Summer', fall: 'Fall', autumn: 'Fall' };
 const SEASON_ORDER = { Winter: 1, Spring: 2, Summer: 3, Fall: 4, 'New Grad': 5 };
 
-/** "Summer 2027", "Fall 2026", "New Grad 2027", or '' — from the first text that names one. */
+/**
+ * "Summer 2027", "Fall 2026", "New Grad 2027", "2027", or '' -- from the first
+ * text that names one.
+ *
+ * Titles rarely put the season next to the year ("Finance Summer Analyst 2027",
+ * "Summer Analyst Intern (2026)"), so a gap of non-digit words is allowed
+ * between them. When only a year appears next to an internship word
+ * ("SWE Intern 2027"), the year alone is the term -- guessing a season would be
+ * wrong as often as it was right, and a bare-year tab still beats "No Term".
+ */
 function extractTerm(...texts) {
+  const YEAR4 = "'?(20[2-3]\\d)\\b";
   const YEAR = "'?(20[2-3]\\d|2[4-9]|3\\d)\\b";
+  const SEASON = "(summer|spring|fall|autumn|winter)";
+  const GRAD = "(new grad(?:uate)?|university grad(?:uate)?|early career)";
+  const CYCLE = "(?:intern(?:ship)?s?|co-?op|analyst|program|term|cycle)";
+  // No digits in the gap, so a match can't jump over another number.
+  const GAP = "[^\\d\\n]{0,30}?";
   const patterns = [
-    [new RegExp("\\b(summer|spring|fall|autumn|winter)\\b[ ,\\-–(]*(?:(?:intern(?:ship)?s?|co-?op|term|program)[ ,\\-–(]*)?" + YEAR, 'i'), m => [SEASONS[m[1].toLowerCase()], m[2]]],
-    [/\b(20[2-3]\d)[ ,\-–]*(summer|spring|fall|autumn|winter)\b/i, m => [SEASONS[m[2].toLowerCase()], m[1]]],
-    [/\b(new grad(?:uate)?|university grad(?:uate)?|early career)\b[^\n]{0,30}?\b(20[2-3]\d)\b/i, m => ['New Grad', m[2]]],
-    [/\b(20[2-3]\d)[ ,\-–]*(new grad(?:uate)?|university grad(?:uate)?)\b/i, m => ['New Grad', m[1]]],
+    // Season then year, adjacent or a few words apart.
+    // (?![a-z]) rather than \b so "Summer2026" still matches.
+    [new RegExp("\\b" + SEASON + "(?![a-z])" + GAP + YEAR, 'i'), m => [SEASONS[m[1].toLowerCase()], m[2]]],
+    // Year then season.
+    [new RegExp("\\b" + YEAR4 + GAP + SEASON + "\\b", 'i'), m => [SEASONS[m[2].toLowerCase()], m[1]]],
+    [new RegExp("\\b" + GRAD + "\\b" + GAP + YEAR4, 'i'), m => ['New Grad', m[2]]],
+    [new RegExp("\\b" + YEAR4 + GAP + GRAD + "\\b", 'i'), m => ['New Grad', m[1]]],
+    // Year with no season, next to an internship/co-op word.
+    [new RegExp("\\b" + CYCLE + "\\b" + GAP + YEAR4, 'i'), m => ['', m[1]]],
+    [new RegExp("\\b" + YEAR4 + GAP + CYCLE + "\\b", 'i'), m => ['', m[1]]],
   ];
   for (const t of texts) {
     if (!t) continue;
@@ -368,7 +445,8 @@ function extractTerm(...texts) {
       const m = t.match(re);
       if (!m) continue;
       const [season, y] = pick(m);
-      return `${season} ${y.length === 2 ? '20' + y : y}`;
+      const year = y.length === 2 ? '20' + y : y;
+      return season ? `${season} ${year}` : year;
     }
   }
   return '';
@@ -377,7 +455,10 @@ function extractTerm(...texts) {
 /** Sorts term tabs newest first; "No Term" and other tabs last. */
 function termSortKey(name) {
   const m = (name || '').match(/^(Winter|Spring|Summer|Fall|New Grad) (\d{4})$/);
-  return m ? Number(m[2]) * 10 + SEASON_ORDER[m[1]] : -1;
+  if (m) return Number(m[2]) * 10 + SEASON_ORDER[m[1]];
+  // A bare-year tab ("2027") sorts just below that year's seasons.
+  const y = (name || '').match(/^(20[2-3]\d)$/);
+  return y ? Number(y[1]) * 10 : -1;
 }
 
 function isTermName_(name) { return termSortKey(name) > 0; }
@@ -429,6 +510,13 @@ function normRole(s) {
 function sameCompany_(a, b) {
   const x = normCompany(a), y = normCompany(b);
   return !!x && !!y && (x === y || x.startsWith(y) || y.startsWith(x));
+}
+
+/** A bare-year term ("2027") is compatible with any season in that year. */
+function sameTerm_(a, b) {
+  if (!a || !b || a === b) return true;
+  const year = s => (String(s).match(/(20[2-3]\d)$/) || [])[1];
+  return (/^20[2-3]\d$/.test(a) || /^20[2-3]\d$/.test(b)) && year(a) === year(b);
 }
 
 function sameRole_(a, b) {
@@ -486,7 +574,7 @@ function findRow_(rows, p) {
   if (!p.company) return null;
   // Summer 2026 and Summer 2027 at the same company are separate applications.
   const sameCo = rows.filter(r =>
-    sameCompany_(r.values['Company'], p.company) && (!r.term || !p.term || r.term === p.term));
+    sameCompany_(r.values['Company'], p.company) && sameTerm_(r.term, p.term));
   if (!sameCo.length) return null;
 
   if (p.role) {
