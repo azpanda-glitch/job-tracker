@@ -28,14 +28,28 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
 ## How the company is identified
 In order, first hit wins:
 1. The subject ("Thank you for applying to **Stripe**", LinkedIn's "your application was sent to **X**").
-2. The sender's display name, unless it's a person's name that's also spelled out in the address.
+2. The sender's display name, **unless it's a person**. `Priya Raman <praman@figma.com>` is
+   Figma, not Priya Raman. "Priya **at Figma**" and "Datadog Recruiting" work as you'd expect.
 3. **The sending domain.** `recruiting@datadoghq.com` -> Datadog, `careers@acme.co.uk` -> Acme,
    `noreply@mail.ramp.com` -> Ramp. Personal domains (Gmail, Outlook) are skipped.
-   For ATS senders the local part is used instead, since that's where the employer usually
-   sits (`nvidia@myworkday.com`, `figma@talent.icims.com`); a generic one (`no-reply@`,
-   `jobs-noreply@`) is ignored.
-4. The **Reply-To** address, read the same way. ATS mail often replies to the employer's recruiter.
+4. The **Reply-To** address, read the same way.
 5. The body ("...your application **at X**").
+6. Last resort: a person-looking display name on ATS mail, flagged "Needs review" since it
+   might be the recruiter.
+
+Two kinds of sender never name the company:
+- **ATS platforms** (Greenhouse, Lever, Workday, ...): their domain is skipped. Workday and
+  iCIMS are the exception, since they put the employer in the address (`nvidia@myworkday.com`).
+- **Recruiting tools** that email for many employers: schedulers (GoodTime, Calendly),
+  chatbots (Paradox), CRMs (Gem, Yello), assessments (Karat, SHL), and job boards (Wellfound,
+  Indeed, RippleMatch). These are listed in `RECRUITING_TOOL_DOMAINS`. Without that list,
+  applications to different employers sent through the same tool merged into one row.
+
+## When an application is missing
+**Job Tracker > Show skipped emails** opens a log of emails that looked application-related
+(from a recruiting platform, or a subject like "your application") but couldn't be turned into
+a row. Usually it's wording the status patterns don't know yet. Send the sentence that should
+have matched, add it to `STATUS_PATTERNS`, delete the hidden `_seen` tab, and run Backfill.
 
 ## Behavior
 - Tabs are created automatically, newest term first. The term is read from the role
@@ -72,7 +86,8 @@ Edit the constants at the top of `Code.gs`:
 
 | Constant | What it controls |
 |---|---|
-| `ATS_DOMAINS` | senders that are always worth scanning (Workday, Greenhouse, Lever, ...) |
+| `ATS_DOMAINS` | applicant tracking systems that are always worth scanning (Workday, Greenhouse, Lever, ...) |
+| `RECRUITING_TOOL_DOMAINS` | schedulers, chatbots, CRMs and job boards that email for many employers: scanned, but never used as the company |
 | `SUBJECT_PHRASES` | subject wording that marks an application email |
 | `BODY_PHRASES` | wording searched anywhere in the message, which is how rejections from a plain recruiter address with a vague subject get found |
 | `NOISE_SUBJECTS` | subjects to exclude (job alerts) |
@@ -81,7 +96,8 @@ Edit the constants at the top of `Code.gs`:
 | `FREE_MAIL` | personal mail domains, which never name a company |
 
 The Gmail search is deliberately wide -- `STATUS_PATTERNS` is the real filter, so a
-thread that matches the search but isn't an application email simply produces no row.
+thread that matches the search but isn't an application email simply produces no row. It runs
+as several short searches merged by thread, rather than one long query.
 
 After changes, run the parser tests:
 

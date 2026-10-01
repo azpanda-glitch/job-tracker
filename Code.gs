@@ -14,6 +14,8 @@
 const CONFIG = {
   NO_TERM_SHEET_NAME: 'No Term',
   SEEN_SHEET_NAME: '_seen',
+  SKIPPED_SHEET_NAME: '_skipped',
+  MAX_SKIPPED: 500,          // newest kept; older rows are trimmed
   SCAN_DAYS: 2,            // hourly scans look back this far; overlap is fine, messages are deduped by ID
   BACKFILL_DAYS: 365,
   BACKFILL_WINDOW_DAYS: 14,  // backfill walks the year oldest-first in slices this size
@@ -46,6 +48,35 @@ const ATS_DOMAINS = [
   'hackerrank.com', 'hackerrankforwork.com', 'codesignal.com', 'codility.com', 'hirevue.com', 'joinhandshake.com',
   'linkedin.com', 'eightfold.ai', 'avature.net', 'oraclecloud.com', 'dayforcehcm.com',
 ];
+
+// Recruiting tools that email on behalf of many employers: scheduling, chatbots,
+// assessments, CRMs, job boards. Their domain and display name ("Olivia",
+// "Interview Scheduling") never name the employer, and treating them as the
+// company merged applications at different employers into one row.
+const RECRUITING_TOOL_DOMAINS = [
+  'paradox.ai', 'gem.com', 'goodtime.io', 'modernloop.io', 'yello.co', 'beamery.com',
+  'phenompeople.com', 'phenom.com', 'applytojob.com', 'jazzhr.com', 'recruitee.com',
+  'teamtailor.com', 'teamtailor-mail.com', 'rippling.com', 'ultipro.com', 'ukg.com',
+  'brassring.com', 'csod.com', 'paylocity.com', 'adp.com', 'breezy.hr', 'pinpointhq.com',
+  'dover.com', 'wellfound.com', 'angel.co', 'indeed.com', 'indeedemail.com',
+  'ziprecruiter.com', 'glassdoor.com', 'ripplematch.com', 'wayup.com', 'symplicity.com',
+  '12twenty.com', 'calendly.com', 'modernhire.com', 'pymetrics.ai', 'harver.com',
+  'karat.io', 'karat.com', 'coderbyte.com', 'testgorilla.com', 'mettl.com', 'shl.com',
+  'criteriacorp.com', 'otta.com', 'welcometothejungle.com', 'simplify.jobs',
+];
+
+// The only senders that put the employer in the local part
+// (<company>@myworkday.com, <company>@talent.icims.com). Elsewhere the local part
+// is a person or a mailbox name.
+const EMPLOYER_IN_LOCAL_DOMAINS = ['myworkday.com', 'myworkdayjobs.com', 'icims.com'];
+
+const RECRUITING_DOMAINS = ATS_DOMAINS.concat(RECRUITING_TOOL_DOMAINS);
+
+const isRecruitingDomain_ = domain => RECRUITING_DOMAINS.some(d => domain === d || domain.endsWith('.' + d));
+const isToolDomain_ = domain => RECRUITING_TOOL_DOMAINS.some(d => domain === d || domain.endsWith('.' + d));
+
+// Words that make a two- or three-word name a company rather than a person.
+const COMPANY_WORDS = /\b(inc|llc|ltd|corp|corporation|co|company|labs?|technolog(y|ies)|tech|bank|capital|group|partners|systems|solutions|health(care)?|software|studios?|games|ai|financial|securities|holdings|street|sigma|research|robotics|motors|energy|foods?|media|networks?|analytics|ventures|consulting|insurance|airlines?|pharma(ceuticals)?|bio|therapeutics|university|college|institute|foundation|management|advisors|associates|trading|markets|payments|cloud|data|digital|mobile|global|international|americas?|brands|entertainment|interactive|industries|aerospace|defense|dynamics|electric|automotive|logistics|realty|properties|investments|asset|fund|express)\b/i;
 
 const SUBJECT_PHRASES = [
   'thank you for applying', 'thanks for applying', 'thank you for your application',
@@ -90,6 +121,7 @@ const FREE_MAIL = /^(gmail|googlemail|yahoo|ymail|rocketmail|hotmail|outlook|liv
 
 // Domains whose company name can't be recovered by capitalizing. Add your own.
 const DOMAIN_COMPANY_NAMES = {
+  gs: 'Goldman Sachs', ms: 'Morgan Stanley', jpmchase: 'JPMorgan Chase', bofa: 'Bank of America',
   goldmansachs: 'Goldman Sachs', jpmorgan: 'JPMorgan Chase', jpmorganchase: 'JPMorgan Chase',
   morganstanley: 'Morgan Stanley', bankofamerica: 'Bank of America', wellsfargo: 'Wells Fargo',
   janestreet: 'Jane Street', twosigma: 'Two Sigma', capitalone: 'Capital One',
@@ -167,6 +199,8 @@ function onOpen() {
     .createMenu('Job Tracker')
     .addItem('Scan now', 'scanNow')
     .addItem('Backfill last 12 months', 'backfill')
+    .addSeparator()
+    .addItem('Show skipped emails', 'showSkipped')
     .addToUi();
 }
 
@@ -242,7 +276,12 @@ function scan_(timeClause, sinceMs, started) {
     const outOfTime = () => Date.now() - started > CONFIG.MAX_RUN_MS;
 
     const messages = [];
-    for (const thread of searchThreads_(buildQuery(timeClause))) {
+    const threads = new Map();
+    for (const q of buildQueries(timeClause)) {
+      for (const th of searchThreads_(q)) threads.set(th.getId(), th);
+      if (outOfTime()) return false;
+    }
+    for (const thread of threads.values()) {
       if (outOfTime()) return false;
       // Later messages in a thread (e.g. a rejection reply) are included even if
       // they fall after this slice, since they may not match the search on their own.
@@ -256,6 +295,7 @@ function scan_(timeClause, sinceMs, started) {
     messages.sort((a, b) => a.getDate() - b.getDate());
 
     const newSeen = [];
+    const skipped = [];
     let finished = true;
     for (const m of messages) {
       if (outOfTime()) { finished = false; break; } // the rest gets picked up next run
@@ -268,27 +308,40 @@ function scan_(timeClause, sinceMs, started) {
         date: m.getDate(),
         replyTo: m.getReplyTo(),
       });
-      if (!parsed) continue;
+      if (!parsed) {
+        if (worthReviewing_(m.getFrom(), m.getSubject())) skipped.push([m.getDate(), m.getFrom(), m.getSubject()]);
+        continue;
+      }
       parsed.threadUrl = 'https://mail.google.com/mail/#all/' + m.getThread().getId();
       applyToTable_(table, parsed);
     }
 
     writeTables_(ss, table);
     saveSeen_(ss, newSeen);
+    saveSkipped_(ss, skipped);
     return finished;
   } finally {
     lock.releaseLock();
   }
 }
 
-function buildQuery(timeClause) {
-  const from = ATS_DOMAINS.join(' OR ');
-  const subjects = SUBJECT_PHRASES.map(p => `"${p}"`).join(' OR ');
-  const bodies = BODY_PHRASES.map(p => `"${p}"`).join(' OR ');
-  const noise = NOISE_SUBJECTS.map(p => `"${p}"`).join(' OR ');
-  // Deliberately wide: classifyStatus is the real filter, so a thread that
-  // matches here but isn't an application email simply produces no row.
-  return `(from:(${from}) OR subject:(${subjects}) OR (${bodies})) -subject:(${noise}) ${timeClause}`;
+/**
+ * Several short Gmail searches instead of one long one. Gmail doesn't document
+ * a length limit for a query, and a single ~2,000-character OR-chain is exactly
+ * the kind of thing that can quietly stop matching. Results are merged by thread.
+ */
+function buildQueries(timeClause) {
+  const quote = list => list.map(p => `"${p}"`).join(' OR ');
+  const noise = `-subject:(${quote(NOISE_SUBJECTS)})`;
+  const queries = [];
+  for (let i = 0; i < RECRUITING_DOMAINS.length; i += 20) {
+    queries.push(`from:(${RECRUITING_DOMAINS.slice(i, i + 20).join(' OR ')}) ${noise} ${timeClause}`);
+  }
+  queries.push(`subject:(${quote(SUBJECT_PHRASES)}) ${noise} ${timeClause}`);
+  // Body wording only counts alongside an application word: "unfortunately" on
+  // its own matched enough newsletters to slow the backfill to a crawl.
+  queries.push(`(${quote(BODY_PHRASES)}) (application OR candidacy OR position OR role OR interest) ${noise} ${timeClause}`);
+  return queries;
 }
 
 function searchThreads_(query) {
@@ -324,6 +377,7 @@ function parseEmail({ from, subject, body, html, date, replyTo }) {
   let link = extractJobLink(body + '\n' + (html || ''));
   const notes = [];
   if (!company || !role) notes.push('Needs review: couldn\'t read ' + [!company && 'company', !role && 'role'].filter(Boolean).join(' / '));
+  else if (company === personSenderName_(from || '')) notes.push('Needs review: company may be the recruiter\'s name');
   if (!link && company) {
     link = 'https://www.google.com/search?q=' + encodeURIComponent([company, role, 'careers'].filter(Boolean).join(' '));
     notes.push('Posting link is a search');
@@ -332,8 +386,17 @@ function parseEmail({ from, subject, body, html, date, replyTo }) {
   return { status, company, role, term, link, source: sourceOf(from || ''), date, notes: notes.join('; ') };
 }
 
+// Confirmation boilerplate that reads like a rejection out of context:
+// "If you are not selected, we'll keep your resume on file", "we'll update you
+// once the position has been filled". Removed before classifying.
+const CONDITIONAL_REJECTION = new RegExp([
+  '\\b(?:if|in\\s+case|in\\s+the\\s+event(?:\\s+that)?|should)\\s+(?:you\\s+(?:are|were|aren[\\u2019\\u0027]t)|you[\\u2019\\u0027]re)\\s+not\\s+(?:selected|chosen|moved|moving|successful)[^.!?\\n]*',
+  '\\b(?:once|when|until|after|before|if)\\s+(?:the|this|a|our)\\s+(?:position|role|req(?:uisition)?|opening)\\s+(?:has\\s+been|is|was|gets|have\\s+been)\\s+(?:filled|closed)[^.!?\\n]*',
+].join('|'), 'gi');
+
 function classifyStatus(text) {
-  for (const [status, re] of STATUS_PATTERNS) if (re.test(text)) return status;
+  const t = String(text || '').replace(CONDITIONAL_REJECTION, ' ');
+  for (const [status, re] of STATUS_PATTERNS) if (re.test(t)) return status;
   return null;
 }
 
@@ -356,6 +419,9 @@ function extractCompany(subject, body, from, replyTo) {
     companyFromSenderAddress_(replyTo || ''),
     match_(head, new RegExp("\\b(?:appl(?:y|ying|ication)|interest|position|role|opening|internship)\\b[^!?\\n]{0,80}?[ ](?:at|with)[ ]+" + CAP_RUN)),
     match_(head, new RegExp("\\b(?:appl(?:y|ying|ication)|interest)[ ]+(?:to|in|with|at)[ ]+" + CAP_RUN)),
+    // Last resort: a person-looking name on ATS mail. Sometimes it really is the
+    // company ("Two Sigma <no-reply@greenhouse.io>"); parseEmail flags the row.
+    personSenderName_(from),
   ];
   for (const c of candidates) {
     const cleaned = cleanCompany_(c);
@@ -376,30 +442,67 @@ function cleanCompany_(s) {
   return s;
 }
 
-function companyFromSenderName_(from) {
+function senderAddress_(from) {
+  return (((from.match(/<([^>]+)>/) || [])[1] || from).trim().toLowerCase());
+}
+
+function senderDomain_(from) {
+  return senderAddress_(from).split('@')[1] || '';
+}
+
+/** The display name with recruiting words removed: "Stripe Hiring Team" -> "Stripe". */
+function senderDisplayName_(from) {
   let name = (from.match(/^\s*"?([^"<]+?)"?\s*</) || [])[1] || '';
+  // "Priya at Figma", "Jordan from Ramp": the employer is named outright.
   const via = name.match(/\b(?:from|at|@)\s+(.+)$/i);
   if (via) name = via[1];
   name = name
     .replace(/\b(university recruiting|campus recruiting|talent acquisition|hiring team|recruiting team|recruitment|recruiting|careers?|talent|hiring|jobs|team|hr|people|no-?reply|notifications?|via \w+)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!name || /@/.test(name)) return '';
-  if (GENERIC_SENDERS.some(g => name.toLowerCase().includes(g))) return '';
-  // Widening the search to rejection wording brought in mail from individual
-  // recruiters ("Priya Raman <priya.raman@figma.com>"), whose display name is a
-  // person, not the employer. When the name is spelled out in the address, let
-  // the domain name the company instead.
-  if (nameMatchesAddress_(name, from)) return '';
-  return name;
+  if (!name || /@/.test(name)) return { name: '', via: false };
+  if (GENERIC_SENDERS.some(g => name.toLowerCase().includes(g))) return { name: '', via: false };
+  return { name, via: !!via };
 }
 
-function nameMatchesAddress_(name, from) {
-  const local = (((from.match(/<([^>]+)>/) || [])[1] || from).split('@')[0] || '')
-    .toLowerCase().replace(/[^a-z]/g, '');
-  if (!local) return false;
-  const parts = name.toLowerCase().match(/[a-z]{2,}/g) || [];
-  return parts.length >= 2 && parts.every(w => local.includes(w));
+/** "Priya Raman", "Jordan K. Lee" -- but not "Two Sigma Investments" or "Stripe". */
+function looksLikePerson_(name) {
+  const tokens = name.split(/\s+/);
+  if (tokens.length < 2 || tokens.length > 3) return false;
+  if (COMPANY_WORDS.test(name)) return false;
+  return tokens.every(w => /^[A-Z][a-z\u00e0-\u00ff'\u2019-]+$/.test(w) || /^[A-Z]\.?$/.test(w));
+}
+
+/**
+ * The company from the sender's display name, or '' when that name is a person
+ * or a tool rather than the employer.
+ */
+function companyFromSenderName_(from) {
+  const { name, via } = senderDisplayName_(from);
+  if (!name) return '';
+  if (via) return name;
+  const domain = senderDomain_(from);
+  // Scheduling tools and chatbots: the display name is a bot or a coordinator.
+  if (isToolDomain_(domain)) return '';
+  if (domain && !isRecruitingDomain_(domain) && !FREE_MAIL.test(domainBase_(domain))) {
+    // A company's own domain already names the employer. The display name only
+    // wins when it isn't a person, or when it's the same name better spelled
+    // ("Jane Street" for janestreet.com).
+    const base = domainBase_(domain).replace(/[^a-z0-9]/g, '');
+    const flat = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const sameAsDomain = flat.length >= 3 && (flat === base || base.startsWith(flat) || flat.startsWith(base));
+    return sameAsDomain || !looksLikePerson_(name) ? name : '';
+  }
+  // ATS or personal mailbox: a person's name says nothing about the employer.
+  return looksLikePerson_(name) ? '' : name;
+}
+
+/** The person-looking ATS display name that companyFromSenderName_ held back. */
+function personSenderName_(from) {
+  const domain = senderDomain_(from);
+  if (!domain || isToolDomain_(domain) || !isRecruitingDomain_(domain)) return '';
+  const { name, via } = senderDisplayName_(from);
+  return !via && name && looksLikePerson_(name) ? name : '';
 }
 
 /**
@@ -408,12 +511,12 @@ function nameMatchesAddress_(name, from) {
  * put the employer (<company>@myworkday.com, <company>@talent.icims.com).
  */
 function companyFromSenderAddress_(from) {
-  const addr = ((from.match(/<([^>]+)>/) || [])[1] || from).trim().toLowerCase();
-  const [local, domain] = addr.split('@');
+  const [local, domain] = senderAddress_(from).split('@');
   if (!domain || !local) return '';
-  if (ATS_DOMAINS.some(d => domain.endsWith(d))) {
-    // A generic local part is the ATS talking, and says nothing about who hired.
-    return GENERIC_LOCAL.test(local) ? '' : companyFromWord_(local);
+  if (isRecruitingDomain_(domain)) {
+    if (!EMPLOYER_IN_LOCAL_DOMAINS.some(d => domain === d || domain.endsWith('.' + d))) return '';
+    // A generic or dotted local part is a mailbox or a person, not the employer.
+    return GENERIC_LOCAL.test(local) || /[._]/.test(local) ? '' : companyFromWord_(local);
   }
   const base = domainBase_(domain);
   return FREE_MAIL.test(base) ? '' : companyFromWord_(base);
@@ -742,6 +845,45 @@ function writeTables_(ss, table) {
     const out = byTab[tab].map(r => header.map(h => (h in r.values ? r.values[h] : '')));
     sheet.getRange(sheet.getLastRow() + 1, 1, out.length, header.length).setValues(out);
   });
+}
+
+// ---------- Skipped-email log ----------
+
+/**
+ * Emails that look application-related but produced no row: the place to look
+ * when an application is missing. Plain search noise (a newsletter that said
+ * "unfortunately") isn't logged, or the real misses would be buried.
+ */
+function worthReviewing_(from, subject) {
+  const domain = senderDomain_(from || '');
+  if (domain && isRecruitingDomain_(domain)) return true;
+  const s = (subject || '').toLowerCase();
+  return SUBJECT_PHRASES.some(p => new RegExp('\\b' + p.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '\\b').test(s));
+}
+
+function saveSkipped_(ss, rows) {
+  if (!rows.length) return;
+  let sheet = ss.getSheetByName(CONFIG.SKIPPED_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.SKIPPED_SHEET_NAME);
+    sheet.getRange(1, 1, 1, 3).setValues([['Date', 'From', 'Subject']]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.hideSheet();
+  }
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 3).setValues(rows);
+  const extra = sheet.getLastRow() - 1 - CONFIG.MAX_SKIPPED;
+  if (extra > 0) sheet.deleteRows(2, extra);
+}
+
+function showSkipped() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SKIPPED_SHEET_NAME);
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('Nothing skipped yet. Emails that look application-related but couldn\'t be read show up here after a scan.');
+    return;
+  }
+  sheet.showSheet();
+  ss.setActiveSheet(sheet);
 }
 
 function loadSeen_(ss) {

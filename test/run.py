@@ -77,6 +77,11 @@ STATUS_CASES = [
     ("We'd like to move forward with your application and schedule a phone screen. Please share your availability.", "Interview"),
 
     ("Your package has shipped and will arrive Tuesday.", None),
+
+    # Confirmation boilerplate that used to be filed as a rejection.
+    ("Thank you for applying! If you are not selected for this role, we will keep your resume on file.", "Applied"),
+    ("Thanks for applying. We'll let you know once the position has been filled.", "Applied"),
+    ("Thank you for applying. If you're not selected, we encourage you to apply again.", "Applied"),
 ]
 
 # --- Term detection --------------------------------------------------------
@@ -137,6 +142,47 @@ ADDRESS_CASES = [
     ("noreply@us.greenhouse-mail.io", ""),
     ("jane.doe@gmail.com", ""),                       # personal mailbox
     ("someone@outlook.com", ""),
+    # Recruiting tools send for many employers. Naming the tool as the company
+    # merged applications at different companies into one row.
+    ("olivia@paradox.ai", ""),
+    ("no-reply@gem.com", ""),
+    ("scheduling@goodtime.io", ""),
+    ("notifications@yello.co", ""),
+    ("noreply@ripplematch.com", ""),
+    ("jobs@wellfound.com", ""),
+    ("noreply@applytojob.com", ""),
+    # Only Workday and iCIMS put the employer in the local part; elsewhere it's a person.
+    ("priya.raman@greenhouse-mail.io", ""),
+    ("jordan@hire.lever.co", ""),
+    ("recruiting@gs.com", "Goldman Sachs"),
+]
+
+# --- Company from a whole From line + body ---------------------------------
+# The display name is often a recruiter. These all used to come back as the
+# person's name, or as the recruiting tool's name.
+
+FROM_CASES = [
+    # (From, body, expected company)
+    ("Priya Raman <recruiting@figma.com>", "", "Figma"),
+    ("Priya Raman <priya@figma.com>", "", "Figma"),
+    ("Priya Raman <praman@figma.com>", "", "Figma"),
+    ("Datadog Recruiting <recruiting@datadoghq.com>", "", "Datadog"),
+    ("Jane Street <recruiting@janestreet.com>", "", "Jane Street"),
+    ("Goldman Sachs Campus Recruiting <campus@gs.com>", "", "Goldman Sachs"),
+    ("Priya at Figma <no-reply@greenhouse.io>", "", "Figma"),
+    ("Stripe <no-reply@us.greenhouse-mail.io>", "", "Stripe"),
+    # ATS mail from a person: the body names the employer.
+    ("Priya Raman <no-reply@greenhouse.io>",
+     "Thank you for applying to the Software Engineer Intern role at Notion.", "Notion"),
+    ("Jordan Lee <jordan@hire.lever.co>",
+     "Thanks for your interest in the Data Science Intern position at Ramp.", "Ramp"),
+    # Recruiting tools: never the tool or the bot, always the employer in the body.
+    ("Olivia <olivia@paradox.ai>",
+     "Thank you for applying to the Software Engineer Intern role at Stripe.", "Stripe"),
+    ("Interview Scheduling <scheduling@goodtime.io>",
+     "Please pick a time for your interview for the Product Intern role at Figma.", "Figma"),
+    ("Gem <no-reply@gem.com>",
+     "Thanks for your interest in the Analyst Intern position at Two Sigma.", "Two Sigma"),
 ]
 
 
@@ -343,6 +389,32 @@ def main():
         if got != want:
             problems.append("term %r: got %r, want %r" % (text, got, want))
 
+    for frm, body, want in FROM_CASES:
+        got = js(ctx, "extractCompany(%s, %s, %s, '')", "Update on your application", body, frm)
+        if got != want:
+            problems.append("from %r: got %r, want %r" % (frm, got, want))
+
+    # When the only candidate is a person-looking ATS name, keep it but flag the row.
+    got = js(ctx, """(function(){var p = parseEmail({from: 'Morgan Stanley <no-reply@greenhouse.io>',
+      subject: 'Your application', body: 'Thank you for applying to the Quant Intern role.', date: new Date()});
+      return [p.company, p.notes];})()""")
+    if got[0] != "Morgan Stanley" or "recruiter" not in got[1]:
+        problems.append("person-looking ATS name not flagged: %r" % got)
+
+    # Different employers through the same recruiting tool stay separate rows.
+    got = js(ctx, """(function(){
+      var t = {header: [], rows: []};
+      [['Olivia <olivia@paradox.ai>', 'Thank you for applying to the Software Engineer Intern role at Stripe.'],
+       ['Olivia <olivia@paradox.ai>', 'Thank you for applying to the Software Engineer Intern role at Figma.'],
+       ['Olivia <olivia@paradox.ai>', 'Thank you for applying to the Software Engineer Intern role at Ramp.']].forEach(function(e){
+        var p = parseEmail({from: e[0], subject: 'Application received', body: e[1], date: new Date('2026-09-20')});
+        applyToTable_(t, p);
+      });
+      return t.rows.map(function(r){return r.values.Company;}).join(', ');
+    })()""")
+    if got != "Stripe, Figma, Ramp":
+        problems.append("tool-sent applications merged: got %r, want 'Stripe, Figma, Ramp'" % got)
+
     for addr, want in ADDRESS_CASES:
         got = js(ctx, "companyFromSenderAddress_(%s)", addr)
         if got != want:
@@ -352,11 +424,12 @@ def main():
     check_tables(ctx, problems)
     check_tab_order(ctx, problems)
 
-    total = len(STATUS_CASES) + len(TERM_CASES) + len(ADDRESS_CASES) + len(EMAIL_CASES) + 5
+    total = len(STATUS_CASES) + len(TERM_CASES) + len(ADDRESS_CASES) + len(FROM_CASES) + len(EMAIL_CASES) + 7
     for p in problems:
         print("FAIL %s" % p)
     print("\n%d checks, %d failing" % (total, len(problems)))
-    print("query length: %d chars" % len(js(ctx, "buildQuery(%s)", "newer_than:2d")))
+    lengths = js(ctx, "buildQueries(%s).map(function(q){return q.length;})", "newer_than:2d")
+    print("%d Gmail searches, longest %d chars" % (len(lengths), max(lengths)))
     return 1 if problems else 0
 
 
