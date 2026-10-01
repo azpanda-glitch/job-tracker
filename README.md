@@ -18,6 +18,21 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
    Google account. If there's no **Advanced** link, you're on a school or work account whose
    admin blocks unverified scripts — use a personal Gmail account instead.
 
+   With `appsscript.json` in place, these are the permissions it asks for:
+
+   | Permission | Why |
+   |---|---|
+   | **View your email messages and settings** (`gmail.readonly`) | reads application emails. It cannot send, delete, or change anything |
+   | See, edit, create and delete **only this spreadsheet** (`spreadsheets.currentonly`) | writes the rows. No access to your other Drive files |
+   | Run when you're not present (`script.scriptapp`) | the hourly scan |
+   | Display and run third-party web content (`script.container.ui`) | the "Job Tracker" menu |
+   | Connect to an external service (`script.external_request`) | looks up posting links on public job boards |
+   | See your primary email address (`userinfo.email`) | so your own replies are skipped |
+
+   Without that manifest, Apps Script asks for the broadest Gmail permission instead
+   ("Read, compose, send, and **permanently delete** all your email"), which is far more than
+   this script does.
+
    This backfills the last 12 months and installs an hourly scan. Apps Script stops
    runs at 6 minutes, so the backfill works through the year in 2-week slices, oldest
    first, and schedules itself to resume a minute later until it's done. A big inbox
