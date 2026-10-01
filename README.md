@@ -40,6 +40,24 @@ Sheet, with one tab per term: "Summer 2027", "Spring 2027", "New Grad 2027", etc
    Term tabs appear as applications are found.
 4. Reload the Sheet. A "Job Tracker" menu appears with "Scan now" and "Backfill".
 
+## "Why does it say Google hasn't verified this app?"
+Because each person runs their own copy. The script lives in **your** Apps Script project in
+**your** Google account, so there's no third-party app in the middle and nothing for Google to
+verify — that review is for apps published to other people. The tradeoff is the warning
+screen; the upside is that your email never touches anyone else's server.
+
+What makes it checkable rather than just trust-me:
+- The code is all here, in one file, and you paste it in yourself.
+- The permissions it asks for are listed in `appsscript.json`, and the table in step 3 explains
+  each one. Gmail access is **read-only**: it can't send, delete, or change anything.
+- Revoke it any time at [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
+Removing the warning would mean publishing this as a hosted app that reads *other* people's
+Gmail. Gmail read access is a **restricted** OAuth scope, so that route requires app
+verification plus an annual third-party security assessment, a privacy policy, terms, and a
+demo video — and it would route your email through someone else's servers. Clicking past one
+warning screen is the better trade.
+
 ## How the company is identified
 In order, first hit wins:
 1. The subject ("Thank you for applying to **Stripe**", LinkedIn's "your application was sent to **X**").
