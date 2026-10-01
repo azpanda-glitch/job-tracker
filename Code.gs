@@ -22,6 +22,13 @@ const CONFIG = {
   MAX_THREADS: 2000,         // per search; a slice or 2-day scan won't come close
   MAX_RUN_MS: 4.5 * 60 * 1000, // Apps Script kills runs at 6 min; stop early and save progress
   MERGE_WINDOW_DAYS: 3,    // a role-less confirmation within this many days of another from the same company is a duplicate
+  // Only emails this recent get their posting looked up. Older postings are
+  // usually closed, so a lookup during the backfill would mostly find nothing.
+  LOOKUP_DAYS: 7,
+  // Optional: a Google Programmable Search key and engine ID, used when the
+  // company's job board isn't on Greenhouse, Lever, or Ashby. Leave blank to skip.
+  SEARCH_API_KEY: '',
+  SEARCH_ENGINE_ID: '',
 };
 
 const HEADERS = ['Company', 'Role', 'Status', 'Date Applied', 'Last Update', 'Posting Link', 'Source', 'Email', 'Notes'];
@@ -296,6 +303,7 @@ function scan_(timeClause, sinceMs, started) {
 
     const newSeen = [];
     const skipped = [];
+    const boards = {}; // company -> open jobs, fetched at most once per run
     let finished = true;
     for (const m of messages) {
       if (outOfTime()) { finished = false; break; } // the rest gets picked up next run
@@ -313,6 +321,13 @@ function scan_(timeClause, sinceMs, started) {
         continue;
       }
       parsed.threadUrl = 'https://mail.google.com/mail/#all/' + m.getThread().getId();
+      if (parsed.needsLookup && Date.now() - m.getDate().getTime() <= CONFIG.LOOKUP_DAYS * 864e5) {
+        const found = findPostingLink_(parsed.company, parsed.role, boards);
+        if (found) {
+          parsed.link = found;
+          parsed.notes = parsed.notes.replace(/;?\s*Posting link is a search/, '').replace(/^;\s*/, '');
+        }
+      }
       applyToTable_(table, parsed);
     }
 
@@ -378,12 +393,13 @@ function parseEmail({ from, subject, body, html, date, replyTo }) {
   const notes = [];
   if (!company || !role) notes.push('Needs review: couldn\'t read ' + [!company && 'company', !role && 'role'].filter(Boolean).join(' / '));
   else if (company === personSenderName_(from || '')) notes.push('Needs review: company may be the recruiter\'s name');
-  if (!link && company) {
+  const needsLookup = !link && !!company;
+  if (needsLookup) {
     link = 'https://www.google.com/search?q=' + encodeURIComponent([company, role, 'careers'].filter(Boolean).join(' '));
     notes.push('Posting link is a search');
   }
 
-  return { status, company, role, term, link, source: sourceOf(from || ''), date, notes: notes.join('; ') };
+  return { status, company, role, term, link, needsLookup, source: sourceOf(from || ''), date, notes: notes.join('; ') };
 }
 
 // Confirmation boilerplate that reads like a rejection out of context:
@@ -654,6 +670,96 @@ function match_(s, re) {
 
 function titleCase_(s) {
   return s.replace(/[-_.]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim();
+}
+
+// ---------- Posting lookup ----------
+
+/** Board slugs to try: "Jane Street" -> ["janestreet", "jane-street"]. */
+function boardSlugs(company) {
+  const words = normCompany(company) ? company.toLowerCase()
+    .replace(/\b(inc|llc|ltd|corp|corporation|co|company)\b\.?/g, '')
+    .match(/[a-z0-9]+/g) || [] : [];
+  if (!words.length) return [];
+  return [...new Set([words.join(''), words.join('-')])];
+}
+
+const ROLE_STOPWORDS = /^(the|a|an|and|of|for|to|in|at|with|-|summer|fall|spring|winter|autumn|20\d\d|\d+|remote|hybrid|onsite|us|usa)$/;
+
+// The same job is written several ways across the email and the posting.
+const ROLE_SYNONYMS = { engineering: 'engineer', internship: 'intern', interns: 'intern', coop: 'intern',
+  developer: 'engineer', swe: 'engineer', sde: 'engineer', mgr: 'manager', pm: 'manager' };
+
+function roleTokens_(s) {
+  return (s || '').toLowerCase().replace(/\bco-op\b/g, 'coop').replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/)
+    .filter(w => w && !ROLE_STOPWORDS.test(w))
+    .map(w => ROLE_SYNONYMS[w] || w);
+}
+
+/**
+ * The open job that best matches the role, or null. Every meaningful word of the
+ * role has to be in the title (so "Software Engineer Intern" never lands on a
+ * full-time "Senior Software Engineer"), and a role-less row matches nothing --
+ * a company's careers page is no better than the search link already there.
+ */
+function bestJobMatch(jobs, role) {
+  const want = roleTokens_(role);
+  if (!want.length) return null;
+  const isIntern = want.includes('intern');
+  let best = null;
+  for (const job of jobs) {
+    const have = new Set(roleTokens_(job.title));
+    if (isIntern && !have.has('intern')) continue;
+    const hits = want.filter(w => have.has(w)).length;
+    if (hits < want.length) continue;
+    // Prefer the tightest title: fewer extra words beyond the role.
+    const extra = have.size - hits;
+    if (!best || extra < best.extra) best = { url: job.url, extra };
+  }
+  return best ? best.url : null;
+}
+
+/** Open jobs from the public Greenhouse, Lever, and Ashby boards, as [{title, url}]. */
+function fetchBoardJobs_(company) {
+  const get = url => {
+    try {
+      const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+      return r.getResponseCode() === 200 ? JSON.parse(r.getContentText()) : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  for (const slug of boardSlugs(company)) {
+    const gh = get(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`);
+    if (gh && gh.jobs) return gh.jobs.map(j => ({ title: j.title, url: j.absolute_url }));
+    const lever = get(`https://api.lever.co/v0/postings/${slug}?mode=json`);
+    if (Array.isArray(lever)) return lever.map(j => ({ title: j.text, url: j.hostedUrl }));
+    const ashby = get(`https://api.ashbyhq.com/posting-api/job-board/${slug}`);
+    if (ashby && ashby.jobs) return ashby.jobs.map(j => ({ title: j.title, url: j.jobUrl }));
+  }
+  return [];
+}
+
+/** First result from Google Programmable Search, if it's configured. */
+function searchPosting_(company, role) {
+  if (!CONFIG.SEARCH_API_KEY || !CONFIG.SEARCH_ENGINE_ID) return '';
+  const q = `"${company}" "${role}"`;
+  try {
+    const r = UrlFetchApp.fetch('https://www.googleapis.com/customsearch/v1?key=' + encodeURIComponent(CONFIG.SEARCH_API_KEY) +
+      '&cx=' + encodeURIComponent(CONFIG.SEARCH_ENGINE_ID) + '&num=1&q=' + encodeURIComponent(q), { muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) return '';
+    const items = JSON.parse(r.getContentText()).items || [];
+    return items.length ? items[0].link : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/** The posting's real URL, or '' to keep the search link. */
+function findPostingLink_(company, role, boards) {
+  if (!role) return '';
+  const key = normCompany(company);
+  if (!(key in boards)) boards[key] = fetchBoardJobs_(company);
+  return bestJobMatch(boards[key], role) || searchPosting_(company, role);
 }
 
 // ---------- Matching emails to rows (pure) ----------

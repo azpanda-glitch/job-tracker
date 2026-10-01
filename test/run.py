@@ -186,6 +186,40 @@ FROM_CASES = [
 ]
 
 
+# --- Posting lookup --------------------------------------------------------
+# Matching a role against a company's open jobs. A wrong link is worse than the
+# search link it replaces, so every meaningful word of the role must match.
+
+BOARD = [
+    {"title": "Senior Software Engineer", "url": "senior"},
+    {"title": "Software Engineer, Intern", "url": "swe-intern"},
+    {"title": "Software Engineer, Intern - Machine Learning", "url": "swe-intern-ml"},
+    {"title": "Associate Product Manager, Intern", "url": "apm-intern"},
+    {"title": "Data Scientist", "url": "ds-fulltime"},
+    {"title": "Applied Scientist Internship", "url": "applied-intern"},
+]
+
+MATCH_CASES = [
+    ("Software Engineer Intern", "swe-intern"),             # tightest title wins over the ML one
+    ("Software Engineering Intern, Summer 2027", "swe-intern"),  # engineering = engineer
+    ("SWE Intern", "swe-intern"),
+    ("Software Engineer Co-op", "swe-intern"),
+    ("Software Engineer Intern, Summer 2027", "swe-intern"),  # season and year ignored
+    ("Associate Product Manager Intern", "apm-intern"),
+    ("Applied Scientist Intern", "applied-intern"),          # intern matches internship
+    ("Data Scientist Intern", None),                         # never an intern role -> full-time posting
+    ("Software Engineer", "senior"),                         # no intern word: plain match is fine
+    ("", None),                                               # no role: nothing to match
+]
+
+SLUG_CASES = [
+    ("Jane Street", ["janestreet", "jane-street"]),
+    ("Stripe", ["stripe"]),
+    ("Ramp, Inc.", ["ramp"]),
+    ("", []),
+]
+
+
 # --- Whole emails ----------------------------------------------------------
 
 EMAIL_CASES = [
@@ -389,6 +423,22 @@ def main():
         if got != want:
             problems.append("term %r: got %r, want %r" % (text, got, want))
 
+    for role, want in MATCH_CASES:
+        got = js(ctx, "bestJobMatch(%s, %s)", BOARD, role)
+        if got != want:
+            problems.append("posting match %r: got %r, want %r" % (role, got, want))
+    for company, want in SLUG_CASES:
+        got = js(ctx, "boardSlugs(%s)", company)
+        if got != want:
+            problems.append("board slugs %r: got %r, want %r" % (company, got, want))
+    # Only emails without a direct link are candidates for a lookup.
+    got = js(ctx, """[parseEmail({from: 'Stripe <no-reply@greenhouse.io>', subject: 'Thank you for applying to Stripe',
+      body: 'Thanks for applying to the Software Engineer Intern position at Stripe.', date: new Date()}).needsLookup,
+      parseEmail({from: 'Stripe <no-reply@greenhouse.io>', subject: 'Thank you for applying to Stripe',
+      body: 'Thanks for applying. https://boards.greenhouse.io/stripe/jobs/123', date: new Date()}).needsLookup]""")
+    if got != [True, False]:
+        problems.append("needsLookup: got %r, want [True, False]" % got)
+
     for frm, body, want in FROM_CASES:
         got = js(ctx, "extractCompany(%s, %s, %s, '')", "Update on your application", body, frm)
         if got != want:
@@ -424,7 +474,7 @@ def main():
     check_tables(ctx, problems)
     check_tab_order(ctx, problems)
 
-    total = len(STATUS_CASES) + len(TERM_CASES) + len(ADDRESS_CASES) + len(FROM_CASES) + len(EMAIL_CASES) + 7
+    total = len(STATUS_CASES) + len(TERM_CASES) + len(ADDRESS_CASES) + len(FROM_CASES) + len(EMAIL_CASES) + len(MATCH_CASES) + len(SLUG_CASES) + 8
     for p in problems:
         print("FAIL %s" % p)
     print("\n%d checks, %d failing" % (total, len(problems)))

@@ -45,6 +45,22 @@ Two kinds of sender never name the company:
   Indeed, RippleMatch). These are listed in `RECRUITING_TOOL_DOMAINS`. Without that list,
   applications to different employers sent through the same tool merged into one row.
 
+## Posting links
+If the email links to the posting, that link is used. If not:
+- **Emails from the last 7 days:** the tracker looks the posting up on the company's public
+  job board (Greenhouse, Lever, or Ashby) and matches it to the role. Every meaningful word
+  of the role has to be in the title, so "Software Engineer Intern" never lands on a full-time
+  "Senior Software Engineer" job; if nothing matches, it keeps the search link.
+- **Older emails** (most of the backfill) keep a Google search link and skip the lookup.
+  Those postings are usually closed by now.
+
+Optional: for companies on other job boards, add a Google Programmable Search key and
+engine ID to `SEARCH_API_KEY` / `SEARCH_ENGINE_ID` at the top of `Code.gs`, and the first
+result is used.
+
+The lookup needs one extra permission (connecting to external services). The first run
+after updating asks you to approve it.
+
 ## When an application is missing
 **Job Tracker > Show skipped emails** opens a log of emails that looked application-related
 (from a recruiting platform, or a subject like "your application") but couldn't be turned into
@@ -91,6 +107,7 @@ Edit the constants at the top of `Code.gs`:
 | `SUBJECT_PHRASES` | subject wording that marks an application email |
 | `BODY_PHRASES` | wording searched anywhere in the message, which is how rejections from a plain recruiter address with a vague subject get found |
 | `NOISE_SUBJECTS` | subjects to exclude (job alerts) |
+| `CONFIG.LOOKUP_DAYS` | how recent an email must be for its posting to be looked up (default 7) |
 | `STATUS_PATTERNS` | the wording that sets each status |
 | `DOMAIN_COMPANY_NAMES` | domains that don't read as a name when capitalized (`goldmansachs` -> Goldman Sachs). Add your own |
 | `FREE_MAIL` | personal mail domains, which never name a company |
